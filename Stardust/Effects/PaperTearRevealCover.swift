@@ -22,6 +22,10 @@ struct PaperTearRevealCover: View {
     @GestureState(resetTransaction: Transaction(animation: .spring(duration: 0.45, bounce: 0.3)))
     private var touchX: CGFloat?
     @State private var nudgeEpoch = Date()
+    /// True only while the idle peel is on screen, so the timeline rests between lifts.
+    @State private var isLifting = false
+    @State private var throwScale: CGFloat = 1
+    @State private var toothIndex = 0
 
     init(size: CGSize, reduceMotion: Bool, messageDuration: Double, releaseProgress: Binding<CGFloat>, dropDistance: CGFloat,
          onRevealStarted: @escaping () -> Void, onRevealCompleted: @escaping () -> Void) {
@@ -41,10 +45,17 @@ struct PaperTearRevealCover: View {
             if reduceMotion {
                 surface(progress: 0)
                     .modifier(PaperCastShadow())
+                    .overlay(alignment: .topLeading) {
+                        // No curl or throw: the cut advancing along the seam is the feedback.
+                        paper.tornEdge(through: max(tearProgress * size.width, paper.notchDepth + 14))
+                            .stroke(PaperTearArtwork.ink.opacity(0.8),
+                                    style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+                            .allowsHitTesting(false)
+                    }
                     .opacity(Double(1 - releaseProgress))
             } else {
-                TimelineView(.animation(paused: !isNudging)) { timeline in
-                    let peel = isNudging ? Self.peel(at: timeline.date.timeIntervalSince(nudgeEpoch)) : 0
+                TimelineView(.animation(paused: !(isNudging && isLifting))) { timeline in
+                    let peel = isNudging && isLifting ? Self.peel(at: timeline.date.timeIntervalSince(nudgeEpoch)) : 0
                     ZStack(alignment: .topLeading) {
                         surface(progress: hasDetached ? 1 : tearProgress, peel: peel, part: .sheet)
                             .modifier(PaperCastShadow())
@@ -52,15 +63,17 @@ struct PaperTearRevealCover: View {
                                                         width: size.width, dropDistance: dropDistance))
                         surface(progress: hasDetached ? 1 : tearProgress, peel: peel, part: .strip)
                             .modifier(PaperPieceRelease(progress: releaseProgress, part: .strip,
-                                                        width: size.width, dropDistance: dropDistance))
+                                                        width: size.width, dropDistance: dropDistance,
+                                                        throwScale: throwScale))
                     }
                 }
             }
 
+            // The whole flap is the handle, from just above its top edge to 22 pt below the seam.
             Color.clear
-                .frame(width: size.width, height: 44)
+                .frame(width: size.width, height: paper.seamY + 38)
                 .contentShape(Rectangle())
-                .position(x: size.width / 2, y: paper.seamY)
+                .position(x: size.width / 2, y: (paper.seamY + 6) / 2)
                 .gesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .named("paperTearSurface"))
                         .updating($isDragging) { _, dragging, _ in dragging = true }
@@ -70,20 +83,26 @@ struct PaperTearRevealCover: View {
                             if dragStartProgress == nil {
                                 // Pick up from wherever the idle peel has lifted the corner.
                                 let peel = Self.peel(at: Date().timeIntervalSince(nudgeEpoch))
-                                if !reduceMotion, tearProgress == 0, peel > 0.004 { tearProgress = peel }
+                                if !reduceMotion, isLifting, tearProgress == 0, peel > 0.004 { tearProgress = peel }
                             }
                             let start = dragStartProgress ?? tearProgress
                             dragStartProgress = start
-                            // The tear front moves 1:1 with the finger and stays torn if it reverses or lifts.
+                            // The tear front moves 1:1 with the finger, all the way to the far edge,
+                            // and stays torn if it reverses or lifts.
                             tearProgress = max(tearProgress, min(1, start + value.translation.width / travel))
-                            if tearProgress >= Self.commitProgress { finishTear() }
+                            toothIndex = Int(tearProgress * size.width / 14)
+                            if tearProgress >= 1 { finishTear(velocity: value.velocity.width / travel) }
                         }
                         .onEnded { value in
                             dragStartProgress = nil
                             guard !hasCommitted else { return }
-                            // A rightward flick past a third of the way throws the rest of the strip off.
+                            // Letting go past the commit point finishes the tear; so does a rightward
+                            // flick from a third of the way.
                             let momentum = (value.predictedEndTranslation.width - value.translation.width) / travel
-                            if tearProgress > 0.33, tearProgress + momentum >= Self.commitProgress { finishTear() }
+                            if tearProgress >= Self.commitProgress
+                                || (tearProgress > 0.33 && tearProgress + momentum >= Self.commitProgress) {
+                                finishTear(velocity: value.velocity.width / travel)
+                            }
                         }
                 )
         }
@@ -103,6 +122,27 @@ struct PaperTearRevealCover: View {
         .onChange(of: isDragging) { _, dragging in
             if !dragging { dragStartProgress = nil }
         }
+        .task(id: isNudging) {
+            guard isNudging else {
+                isLifting = false
+                return
+            }
+            // Re-read the clock every pass so the pauses never drift away from `peel(at:)`.
+            while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(nudgeEpoch) - Self.nudgeDelay
+                let phase = elapsed < 0 ? elapsed : elapsed.truncatingRemainder(dividingBy: Self.nudgePeriod)
+                if phase >= 0, phase < Self.nudgeLength {
+                    isLifting = true
+                    try? await Task.sleep(for: .seconds(Self.nudgeLength - phase + 0.05))
+                } else {
+                    isLifting = false
+                    try? await Task.sleep(for: .seconds(phase < 0 ? -phase : Self.nudgePeriod - phase))
+                }
+            }
+        }
+        // One tick for every two perforation teeth, then a thud as the strip comes away.
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.5), trigger: toothIndex)
+        .sensoryFeedback(.impact(weight: .medium), trigger: hasDetached)
         .allowsHitTesting(!hasCommitted)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Confidential letter from janvi kapoor. Read once.")
@@ -130,12 +170,15 @@ struct PaperTearRevealCover: View {
 
     /// Every 4 s (first after 1.4 s) the loose corner at the notch lifts about 14 pt and settles,
     /// hinting where to start tearing.
+    private static let nudgePeriod = 4.0
+    private static let nudgeDelay = 1.4
+    private static let nudgeLength = 1.1
+
     private static func peel(at elapsed: TimeInterval) -> CGFloat {
-        let period = 4.0, delay = 1.4, length = 1.1
-        guard elapsed > delay else { return 0 }
-        let phase = (elapsed - delay).truncatingRemainder(dividingBy: period)
-        guard phase < length else { return 0 }
-        let lift = sin(.pi * phase / length)
+        guard elapsed > nudgeDelay else { return 0 }
+        let phase = (elapsed - nudgeDelay).truncatingRemainder(dividingBy: nudgePeriod)
+        guard phase < nudgeLength else { return 0 }
+        let lift = sin(.pi * phase / nudgeLength)
         return CGFloat(0.045 * lift * lift)
     }
 
@@ -151,21 +194,28 @@ struct PaperTearRevealCover: View {
 
     private static let commitProgress: CGFloat = 0.85
 
-    private func finishTear() {
+    /// `velocity` is the finger's speed along the seam in card widths per second.
+    private func finishTear(velocity: CGFloat = 0) {
         guard !hasCommitted else { return }
         hasCommitted = true
         onRevealStarted()
-        if reduceMotion {
+        // A hard flick throws the strip further than a slow tear.
+        throwScale = min(1.5, max(0.8, 0.8 + velocity * 0.25))
+        let remaining = 1 - tearProgress
+        guard !reduceMotion, remaining > 0.001 else {
             tearProgress = 1
             releasePaper()
-        } else {
-            // Scale the finish to the distance left so a flick from halfway doesn't snap.
-            let remaining = Double(1 - tearProgress)
-            withAnimation(.easeOut(duration: 0.08 + remaining * 0.6), completionCriteria: .removed) {
-                tearProgress = 1
-            } completion: {
-                releasePaper()
-            }
+            return
+        }
+        // The spring starts at the finger's speed, so there is no seam between drag and finish.
+        // Its initial velocity is relative to the distance left.
+        let relativeVelocity = min(30, Double(max(0, velocity) / remaining))
+        withAnimation(.interpolatingSpring(duration: 0.12 + Double(remaining) * 0.5, bounce: 0,
+                                           initialVelocity: relativeVelocity),
+                      completionCriteria: .logicallyComplete) {
+            tearProgress = 1
+        } completion: {
+            releasePaper()
         }
     }
 
@@ -252,7 +302,8 @@ private struct TornPaperSurface: View, Animatable {
 
     private func drawStrip(in context: GraphicsContext, front: CGFloat, curlProgress: CGFloat) {
         let curl = PaperCurl(front: front, progress: curlProgress)
-        let texture = context.resolve(PaperMaterial.image)
+        // The strip is cut from the same bitmap as the flap, so its shading matches at the tear front.
+        let texture = context.resolve(envelope)
         var lifted = context
         lifted.clip(to: Path(CGRect(x: -Self.shadowPadding, y: -paper.headroom,
                                     width: front + Self.shadowPadding,
@@ -270,8 +321,6 @@ private struct TornPaperSurface: View, Animatable {
                 slice.clip(to: Path(CGRect(x: x, y: -2, width: width + 0.5, height: paper.seamY + 6)))
                 slice.draw(texture, in: paper.textureRect)
             }
-            PaperTearArtwork.shadeFlap(in: strip, path: outline, start: curl.point(.zero),
-                                       end: curl.point(CGPoint(x: 0, y: paper.seamY)))
             let edge = paper.tornEdge(through: front, curl: curl)
             var lip = strip
             lip.translateBy(x: 0, y: -1)
@@ -507,6 +556,7 @@ private struct PaperPieceRelease: AnimatableModifier {
     let part: PaperPart
     let width: CGFloat
     let dropDistance: CGFloat
+    var throwScale: CGFloat = 1
 
     var animatableData: CGFloat {
         get { progress }
@@ -517,9 +567,11 @@ private struct PaperPieceRelease: AnimatableModifier {
         let pose = PaperReleaseMotion.pose(at: progress)
         let isStrip = part == .strip
         content
-            .rotationEffect(.degrees(isStrip ? pose.stripAngle : pose.sheetAngle), anchor: isStrip ? .top : .center)
-            .offset(x: isStrip ? pose.stripX * width : 0,
-                    y: isStrip ? pose.stripY * width : pose.sheetKick * width / 320 + pose.sheetFall * dropDistance)
+            .rotationEffect(.degrees(isStrip ? pose.stripAngle * Double(throwScale) : pose.sheetAngle),
+                            anchor: isStrip ? .top : .center)
+            .offset(x: isStrip ? pose.stripX * width * throwScale : 0,
+                    y: isStrip ? pose.stripY * width * throwScale
+                        : pose.sheetKick * width / 320 + pose.sheetFall * dropDistance)
             .opacity(isStrip ? pose.stripOpacity : 1)
     }
 }

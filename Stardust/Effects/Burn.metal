@@ -20,8 +20,9 @@ static float burnNoise(float2 p) {
 }
 
 // frontY: burn line in layer points (y grows downward; everything below it is burnt).
-// flicker: the animation progress, which changes every frame.
-[[ stitchable ]] half4 burn(float2 position, SwiftUI::Layer layer, float2 size, float frontY, float flicker) {
+// flicker: the animation progress. seconds: time since ignition, so the fire flickers at the
+// same speed whatever the effect duration.
+[[ stitchable ]] half4 burn(float2 position, SwiftUI::Layer layer, float2 size, float frontY, float flicker, float seconds) {
     // Must match CardBurn.bulge in CardFadeEffect.swift.
     float bulge = 22.0 * sin(clamp(position.x / size.x, 0.0, 1.0) * M_PI_F);
     // Noise is keyed on position only, so bites stay pinned to the paper.
@@ -31,7 +32,7 @@ static float burnNoise(float2 p) {
     float d = position.y - (frontY - bulge + rag);   // > 0 is burnt
 
     float heat = smoothstep(-36.0, -6.0, d) * (1.0 - smoothstep(-6.0, 0.0, d));
-    float2 shimmer = float2(sin(position.y * 0.35 + flicker * 40.0), 0.0) * heat * 1.5;
+    float2 shimmer = float2(sin(position.y * 0.35 + seconds * 10.0), 0.0) * heat * 1.5;
     float4 color = float4(layer.sample(position + shimmer));
 
     float3 purple = float3(0.69, 0.32, 0.87);
@@ -52,7 +53,7 @@ static float burnNoise(float2 p) {
 
     // The embers die with the particles once the front has left the card.
     float dying = 1.0 - smoothstep(0.8, 0.92, flicker);
-    float flick = (0.65 + 0.35 * burnNoise(float2(position.x * 0.25, flicker * 30.0))) * dying;
+    float flick = (0.65 + 0.35 * burnNoise(float2(position.x * 0.25, seconds * 7.5))) * dying;
     float rim = smoothstep(-3.0, -0.5, d) * (1.0 - smoothstep(0.5, 3.0, d)) * flick;
     float core = smoothstep(-1.0, 0.3, d) * (1.0 - smoothstep(0.3, 1.5, d));
     float halo = step(0.0, d) * exp(-max(d, 0.0) / 4.0) * 0.35 * flick;

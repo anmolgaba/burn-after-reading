@@ -8,14 +8,15 @@ struct ContentView: View {
 
     private struct EffectSettings {
         var messageDuration = 5.0
-        var movementDuration = 3.0
+        var movementDuration = 4.0
         var reduceMotion = false
 
-        /// The bottom-up erase runs a second longer than the chosen effect duration.
-        var fadeDuration: Double { movementDuration + 1 }
+        var fadeDuration: Double { movementDuration }
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @AccessibilityFocusState private var isMessageFocused: Bool
     @State private var isShowingSettings = false
     @State private var phase = MessagePhase.covered
     @State private var isViewActive = false
@@ -24,11 +25,14 @@ struct ContentView: View {
     @State private var paperReleaseProgress: CGFloat = 0
     @State private var messageCardFrame: CGRect = .zero
     @State private var ashStart: Date?
+    @State private var ashSweepStart: Date?
+    /// 0 while a fresh envelope is above the stage, 1 once it has settled.
+    @State private var coverSettle: CGFloat = 1
     @State private var effectID = UUID()
     @State private var activeSettings = EffectSettings()
     @State private var readingWindow: MessageReadingWindow?
-    @State private var messageDuration = 5.0
-    @State private var movementDuration = 3.0
+    @AppStorage("messageDuration") private var messageDuration = 5.0
+    @AppStorage("effectDuration") private var movementDuration = 4.0
     @ScaledMetric(relativeTo: .title) private var messageSize = 26
 
     private static let salutation = "Dear Rahul,"
@@ -64,22 +68,10 @@ struct ContentView: View {
 
                     Spacer(minLength: 24)
 
-                    Button(action: resetCard) {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 18, weight: .regular))
-                            .foregroundStyle(Color(white: 0.25))
-                            .frame(width: 52, height: 52)
-                            .background(SoftCapsule(shape: Circle()))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.bottom, 12)
-                    .opacity(phase == .finished ? 1 : 0)
-                    .allowsHitTesting(phase == .finished)
-                    .disabled(phase != .finished)
-                    .accessibilityHidden(phase != .finished)
-                    .accessibilityLabel("Replay")
-                    .accessibilityIdentifier("resetMessageButton")
-                    .accessibilityHint("Restores the covered message.")
+                    // Keeps the letter where it sat when a button lived here.
+                    Color.clear
+                        .frame(height: 52)
+                        .padding(.bottom, 12)
                 }
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: geometry.size.height)
@@ -91,18 +83,45 @@ struct ContentView: View {
             .scrollClipDisabled()
         }
         .coordinateSpace(name: "messageRevealStage")
+        .overlay {
+            // No visible control: tapping the ash heap sweeps it away and deals a fresh envelope.
+            Button(action: sweepAsh) {
+                Color.clear.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(height: 120)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(phase == .finished)
+            .disabled(phase != .finished)
+            .accessibilityHidden(phase != .finished)
+            .accessibilityLabel("Replay")
+            .accessibilityIdentifier("resetMessageButton")
+            .accessibilityHint("Sweeps the ash away and restores the covered message.")
+        }
         .background {
             if let ashStart {
                 AshFallView(cardFrame: messageCardFrame,
                             start: ashStart,
                             duration: activeSettings.reduceMotion ? 0.3 : activeSettings.fadeDuration,
-                            reduceMotion: activeSettings.reduceMotion)
+                            reduceMotion: activeSettings.reduceMotion,
+                            sweepStart: ashSweepStart)
                     .id(effectID)
                     .ignoresSafeArea(edges: .bottom)
             }
         }
         .background(Self.stageColor.ignoresSafeArea())
         .tint(Color(white: 0.3))
+        // The paper palette is light only; without this the status bar turns white in dark mode.
+        .preferredColorScheme(.light)
+        .sensoryFeedback(.impact(flexibility: .soft), trigger: phase) { _, new in new == .disappearing }
+        .onChange(of: phase) { _, new in
+            if new == .revealed {
+                isMessageFocused = true
+            } else if new == .finished {
+                AccessibilityNotification.Announcement("The message has burnt away.").post()
+            }
+        }
         .sheet(isPresented: $isShowingSettings) {
             settings
         }
@@ -158,6 +177,12 @@ struct ContentView: View {
         let dropDistance = max(cardHeight, containerHeight - messageCardFrame.minY + width * 0.08 + 32)
 
         return ZStack {
+            if phase == .disappearing || phase == .finished {
+                BurntRemains(size: CGSize(width: width, height: cardHeight))
+                    .opacity(ashSweepStart == nil ? 1 : 0)
+                    .animation(.easeOut(duration: 0.3), value: ashSweepStart)
+            }
+
             Text(Self.letterText)
                 .font(PaperTypography.font(size: messageSize))
                 .lineSpacing(Self.lineSpacing)
@@ -181,7 +206,8 @@ struct ContentView: View {
                         .position(postmark.center)
                 }
                 .modifier(CardFadeEffect(progress: cardFadeProgress, size: CGSize(width: width, height: cardHeight),
-                                         reduceMotion: activeSettings.reduceMotion))
+                                         reduceMotion: activeSettings.reduceMotion,
+                                         duration: activeSettings.fadeDuration))
                 .shadow(color: .black.opacity(0.07), radius: 1, x: 0, y: 1)
                 .shadow(color: .black.opacity(0.055), radius: 12, x: 0, y: 7)
                 .overlay(alignment: .bottom) {
@@ -199,13 +225,15 @@ struct ContentView: View {
                 .modifier(PaperMessageEntrance(progress: paperReleaseProgress, reduceMotion: motionIsReduced))
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(Self.salutation) \(Self.message)")
-                .accessibilityHint("The message begins disappearing after \(Int(activeSettings.messageDuration)) seconds.")
                 .accessibilityIdentifier("messageCard")
                 .accessibilityHidden(phase != .revealed)
+                .accessibilityFocused($isMessageFocused)
 
             if phase == .covered || phase == .opening {
                 revealCover(size: CGSize(width: width, height: cardHeight), dropDistance: dropDistance, runID: runID)
                     .id(runID)
+                    .offset(y: (coverSettle - 1) * 24)
+                    .opacity(Double(min(1, coverSettle)))
             }
         }
         .frame(width: width, height: cardHeight)
@@ -230,7 +258,9 @@ struct ContentView: View {
             onRevealStarted: { beginReveal(runID: runID) },
             onRevealCompleted: {
                 guard isCurrentRun(runID), phase == .opening else { return }
-                readingWindow = MessageReadingWindow(duration: activeSettings.messageDuration)
+                // VoiceOver needs time to reach the letter and read it aloud.
+                readingWindow = MessageReadingWindow(
+                    duration: activeSettings.messageDuration + (voiceOverEnabled ? 8 : 0))
                 phase = .revealed
             }
         )
@@ -250,7 +280,19 @@ struct ContentView: View {
         isViewActive && effectID == runID
     }
 
+    private func sweepAsh() {
+        guard phase == .finished, ashSweepStart == nil else { return }
+        let runID = effectID
+        ashSweepStart = Date()
+        Task {
+            try? await Task.sleep(for: .seconds(AshFallView.sweepDuration))
+            guard isCurrentRun(runID) else { return }
+            resetCard()
+        }
+    }
+
     private func resetCard() {
+        let settles = isViewActive && !reduceMotion
         // Invalidate animation callbacks as well as recreating the cover and particles.
         var reset = Transaction()
         reset.disablesAnimations = true
@@ -262,6 +304,15 @@ struct ContentView: View {
             readingWindow = nil
             areParticlesVisible = false
             ashStart = nil
+            ashSweepStart = nil
+            coverSettle = settles ? 0 : 1
+        }
+        guard settles else { return }
+        // Next run loop pass, so the envelope is drawn above the stage before it drops.
+        DispatchQueue.main.async {
+            withAnimation(.spring(duration: 0.45, bounce: 0.2)) {
+                coverSettle = 1
+            }
         }
     }
 
@@ -282,7 +333,7 @@ struct ContentView: View {
                         Text("\(movementDuration, specifier: "%.1f") seconds")
                             .monospacedDigit()
                     }
-                    Slider(value: $movementDuration, in: 1...6, step: 0.5) {
+                    Slider(value: $movementDuration, in: 2...7, step: 0.5) {
                         Text("Effect duration")
                     }
                     .accessibilityValue("\(movementDuration, specifier: "%.1f") seconds")
@@ -300,6 +351,8 @@ struct ContentView: View {
                 }
             }
         }
+        // Sheets don't inherit the stage's tint, and the sliders ignore the asset accent here.
+        .tint(Color(white: 0.3))
         .presentationDetents([.medium, .large])
     }
 }
@@ -510,6 +563,37 @@ private struct MessagePaperSurface: View {
             }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+    }
+}
+
+/// What the fire leaves on the stage: a soot shadow the size of the letter and one scorched line.
+/// It sits behind the letter, so the burn front uncovers it.
+private struct BurntRemains: View {
+    let size: CGSize
+
+    private static let scorch = Color(red: 0.36, green: 0.27, blue: 0.20)
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Self.scorch.opacity(0.13))
+                .padding(22)
+                .blur(radius: 20)
+
+            VStack(spacing: 10) {
+                Text("burnt after reading")
+                    .font(PaperTypography.font(size: 19))
+                    .foregroundStyle(Self.scorch.opacity(0.6))
+                Text("\(PostalMarks.city) · \(PostalMarks.date)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.5)
+                    .foregroundStyle(Self.scorch.opacity(0.4))
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Burnt after reading")
     }
 }
 

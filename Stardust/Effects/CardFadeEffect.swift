@@ -37,6 +37,7 @@ struct CardFadeEffect: AnimatableModifier {
     var progress: CGFloat
     var size: CGSize
     var reduceMotion = false
+    var duration: Double = 4
 
     var animatableData: CGFloat {
         get { progress }
@@ -52,7 +53,8 @@ struct CardFadeEffect: AnimatableModifier {
                 ShaderLibrary.burn(
                     .float2(size),
                     .float(CardBurn.frontY(progress: progress, height: size.height)),
-                    .float(progress)
+                    .float(progress),
+                    .float(Double(progress) * duration)
                 ),
                 maxSampleOffset: CGSize(width: 4, height: 4),
                 isEnabled: progress > 0
