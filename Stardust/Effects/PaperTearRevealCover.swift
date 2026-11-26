@@ -430,15 +430,23 @@ extension PaperTearArtwork {
                                stampCenter: CGPoint(x: size.width - stamp * 0.95, y: seamY + 20 * scale + stamp * 0.6),
                                size: stamp)
 
+        // CONFIDENTIAL sits in the space left between the read-once note and the airmail band.
         let bandTop = size.height - 7 * scale
-        drawConfidential(in: context, center: CGPoint(x: size.width / 2, y: seamY + (bandTop - seamY) * 0.52))
+        let noteBottom = readOnceTop + 14 * scale * 1.6
+        drawConfidential(in: context, center: CGPoint(x: size.width / 2, y: (noteBottom + bandTop) / 2))
         drawAirmailBand(in: context, top: bandTop)
     }
 
-    /// A handwritten note above the airmail band, in the sender's ink, so the reader learns
+    /// Under the sender line, and clear of the postage group on the right, which reaches down past it.
+    private var readOnceTop: CGFloat {
+        let stamp = size.width * 0.15
+        return seamY + 20 * scale + stamp * 1.34 + 6 * scale
+    }
+
+    /// A handwritten note under the sender, in the sender's ink, so the reader learns
     /// the letter can be read once before they open it.
     func drawReadOnce(in context: GraphicsContext, seconds: Int) {
-        let note = "read once, vanishes \(seconds)s after opening"
+        let note = "read once, gone in \(seconds) seconds"
         let left = size.width * 0.065
         let available = size.width - left * 2
         var fontSize = 14 * scale
@@ -447,7 +455,7 @@ extension PaperTearArtwork {
         context.draw(Text(note)
             .font(PaperTypography.font(size: fontSize))
             .foregroundColor(Color(white: 0.16)),
-            at: CGPoint(x: left, y: size.height - 7 * scale - 14 * scale), anchor: .bottomLeading)
+            at: CGPoint(x: left, y: readOnceTop), anchor: .topLeading)
     }
 
     private func drawConfidential(in context: GraphicsContext, center: CGPoint) {

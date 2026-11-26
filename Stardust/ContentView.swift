@@ -576,19 +576,13 @@ private struct BurntRemains: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 24)
-                .fill(Self.scorch.opacity(0.13))
+                .fill(Self.scorch.opacity(0.22))
                 .padding(22)
                 .blur(radius: 20)
 
-            VStack(spacing: 10) {
-                Text("burnt after reading")
-                    .font(PaperTypography.font(size: 19))
-                    .foregroundStyle(Self.scorch.opacity(0.6))
-                Text("\(PostalMarks.city) · \(PostalMarks.date)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.5)
-                    .foregroundStyle(Self.scorch.opacity(0.4))
-            }
+            Text("burnt after reading")
+                .font(PaperTypography.font(size: 24))
+                .foregroundStyle(Self.scorch.opacity(0.6))
         }
         .frame(width: size.width, height: size.height)
         .allowsHitTesting(false)
